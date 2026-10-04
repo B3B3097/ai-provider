@@ -42,7 +42,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate Compose manifest
+      - name: Validate production Compose manifest
         run: docker compose config --quiet
+      - name: Validate VS Code launch profile
+        env:
+          ADMIN_API_KEY: ci-admin
+          GATEWAY_API_KEY: ci-client
+        run: docker compose -f examples/vscode/run-token-engine.yaml config --quiet
+      - name: Validate VS Code usage profile
+        env:
+          GATEWAY_API_KEY: ci-client
+        run: docker compose -f examples/vscode/show-key-usage.yaml config --quiet
       - name: Build image
         run: docker build --tag unified-llm-gateway:ci .

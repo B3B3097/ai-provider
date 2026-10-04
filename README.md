@@ -46,6 +46,17 @@ requirements.txt
 pyproject.toml
 ```
 
+## VS Code (Russian)
+
+Полная русская инструкция по hosted-выдаче client API key, подключению **Continue** и просмотру расхода токенов находится в [docs/VSCODE_RU.md](docs/VSCODE_RU.md). Готовый шаблон запроса ключа владельцу — [docs/KEY_REQUEST_RU.md](docs/KEY_REQUEST_RU.md).
+
+Готовые профили:
+
+- `examples/vscode/run-token-engine.yaml` — запускает локальный gateway и Redis;
+- `examples/vscode/show-key-usage.yaml` — выводит token usage по конкретному client key.
+
+Raw key формата `sk-live-…` выдаётся владельцем каждому пользователю индивидуально и не публикуется в GitHub/YAML. Клиент хранит его в Continue secret storage или локальном `.env`; владелец может отозвать его через `DELETE /admin/api-keys/{id}`.
+
 ## Setup
 
 ```powershell README.md

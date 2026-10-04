@@ -1,0 +1,70 @@
+# language: YAML, file: examples/vscode/show-key-usage.yaml, runtime: Docker Compose v2
+# Одноразовый запрос GET /v1/usage. Ключ не печатается и не сохраняется в контейнере.
+name: unified-llm-gateway-usage
+
+services:
+  usage:
+    image: python:3.12-slim
+    environment:
+      GATEWAY_URL: ${GATEWAY_URL:-http://host.docker.internal:8080}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Set GATEWAY_API_KEY in the VS Code terminal}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - -c
+      - |
+        import json
+        import os
+        import sys
+        import urllib.error
+        import urllib.request
+
+        base = os.environ["GATEWAY_URL"].rstrip("/")
+        key = os.environ["GATEWAY_API_KEY"]
+        request = urllib.request.Request(
+            f"{base}/v1/usage",
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            print(f"Ошибка gateway: HTTP {exc.code}", file=sys.stderr)
+            try:
+                error = json.loads(body)["error"]
+                print(f"{error.get('message', body)}", file=sys.stderr)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                print(body, file=sys.stderr)
+            raise SystemExit(1)
+        except urllib.error.URLError as exc:
+            print(f"Не удалось подключиться к {base}: {exc.reason}", file=sys.stderr)
+            raise SystemExit(1)
+
+        usage = payload["usage"]
+        limits = payload["limits"]
+        remaining = payload.get("remaining_tokens")
+        print(f"Ключ: {payload['key'].get('name', '-')} ({payload['key_id']})")
+        print(f"Использовано токенов: {usage['tokens_total']:,}".replace(",", " "))
+        if remaining is None:
+            print("Лимит токенов: без ограничения")
+        else:
+            print(f"Осталось токенов: {remaining:,}".replace(",", " "))
+        print(f"Текущий RPM: {usage['rpm_current']}")
+        print(f"Текущий RPD: {usage['rpd_current']}")
+        print(f"Всего запросов: {usage['requests_total']:,}".replace(",", " "))
+        print(
+            "Лимиты: "
+            f"{limits['rpm']} RPM, {limits['rpd']} RPD, "
+            f"{limits['tokens_total']} токенов"
+        )
+
+volumes: {}
