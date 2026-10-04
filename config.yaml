@@ -18,15 +18,25 @@ gateway:
   bind_port: 8080
   workers: 1
   api_keys:
-  - ${GATEWAY_API_KEY:-local-client-key}
+    - "${GATEWAY_API_KEY:-local-client-key}"
   admin_keys:
-  - ${ADMIN_API_KEY:-local-admin-key}
+    - "${ADMIN_API_KEY:-local-admin-key}"
   cors_origins:
-  - http://127.0.0.1
-  - http://localhost
+    - http://127.0.0.1
+    - http://localhost
   rate_limit:
     rpm: 1000
     tpm: 500000
+  public_api:
+    enabled: true
+    store_type: memory
+    redis_prefix: public_api
+    key_prefix: sk-live
+    default_rpm: 60
+    default_rpd: 10000
+    default_token_limit: 1000000
+    default_ttl_days: 0
+    issuer_name: Unified LLM Gateway
   request_timeout: 300
   log_level: INFO
   enable_metrics: true

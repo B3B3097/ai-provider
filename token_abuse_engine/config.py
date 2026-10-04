@@ -1,6 +1,5 @@
 """Complete YAML-driven configuration system"""
 
-
 import os
 import re
 from dataclasses import dataclass, field
@@ -74,7 +73,9 @@ class RetryConfig:
     exponential_base: float = 2.0
     jitter: bool = True
     retry_on: List[int] = field(default_factory=lambda: [429, 500, 502, 503, 504])
-    retry_on_exceptions: List[str] = field(default_factory=lambda: ["timeout", "connection"])
+    retry_on_exceptions: List[str] = field(
+        default_factory=lambda: ["timeout", "connection"]
+    )
 
 
 @dataclass
@@ -210,6 +211,23 @@ class AutoRegistrationConfig:
 
 
 @dataclass
+class PublicApiConfig:
+    enabled: bool = True
+    store_type: str = "memory"
+    redis_url: str = ""
+    redis_prefix: str = "public_api"
+    key_prefix: str = "sk-live"
+    default_rpm: int = 60
+    default_rpd: int = 10_000
+    default_token_limit: int = 1_000_000
+    default_ttl_days: int = 0
+    issuer_name: str = "Unified LLM Gateway"
+    support_url: str = ""
+    terms_url: str = ""
+    privacy_url: str = ""
+
+
+@dataclass
 class GatewayConfig:
     bind_host: str = "0.0.0.0"
     bind_port: int = 8080
@@ -221,6 +239,7 @@ class GatewayConfig:
     jwt_expiry: int = 3600
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    public_api: PublicApiConfig = field(default_factory=PublicApiConfig)
     request_timeout: float = 300.0
     max_request_size: int = 50 * 1024 * 1024
     enable_compression: bool = True
@@ -305,7 +324,7 @@ def load_config(path: Union[str, Path]) -> EngineConfig:
             return os.getenv(var, default)
         return os.getenv(var_expr, match.group(0))
 
-    content = re.sub(r'\$\{([^}]+)\}', replace_env, content)
+    content = re.sub(r"\$\{([^}]+)\}", replace_env, content)
 
     data = yaml.safe_load(content) or {}
 
@@ -323,16 +342,18 @@ def load_config(path: Union[str, Path]) -> EngineConfig:
         evasion = EvasionConfig(**p.pop("evasion", {}))
         health_check = HealthCheckConfig(**p.pop("health_check", {}))
 
-        providers.append(ProviderConfig(
-            models=models,
-            auth=auth,
-            rate_limit=rate_limit,
-            retry=retry,
-            circuit_breaker=circuit_breaker,
-            evasion=evasion,
-            health_check=health_check,
-            **p
-        ))
+        providers.append(
+            ProviderConfig(
+                models=models,
+                auth=auth,
+                rate_limit=rate_limit,
+                retry=retry,
+                circuit_breaker=circuit_breaker,
+                evasion=evasion,
+                health_check=health_check,
+                **p,
+            )
+        )
 
     # Parse token factories
     token_factories = {}
@@ -348,7 +369,12 @@ def load_config(path: Union[str, Path]) -> EngineConfig:
     # Parse gateway
     gateway_data = data.get("gateway", {})
     gateway_rate_limit = RateLimitConfig(**gateway_data.pop("rate_limit", {}))
-    gateway = GatewayConfig(rate_limit=gateway_rate_limit, **gateway_data)
+    public_api = PublicApiConfig(**gateway_data.pop("public_api", {}))
+    gateway = GatewayConfig(
+        rate_limit=gateway_rate_limit,
+        public_api=public_api,
+        **gateway_data,
+    )
 
     # Parse storage
     storage = StorageConfig(**data.get("storage", {}))
@@ -399,7 +425,7 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
             "gpt-4*": ["openai", "azure"],
             "claude*": ["anthropic"],
             "gemini*": ["google"],
-            "*": ["openai", "anthropic", "google", "custom"]
+            "*": ["openai", "anthropic", "google", "custom"],
         },
         "gateway": {
             "bind_host": "0.0.0.0",
@@ -414,20 +440,15 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
             "log_level": "INFO",
             "log_format": "json",
             "enable_metrics": True,
-            "docs_enabled": True
+            "docs_enabled": True,
         },
-        "storage": {
-            "type": "file",
-            "file": {
-                "path": "./tokens/tokens.json"
-            }
-        },
+        "storage": {"type": "file", "file": {"path": "./tokens/tokens.json"}},
         "cluster": {
             "enabled": False,
             "node_id": "${NODE_ID:-}",
             "discovery": {"type": "static", "nodes": []},
             "sync_interval": 60,
-            "token_sharing": True
+            "token_sharing": True,
         },
         "monitoring": {
             "prometheus": {"enabled": True, "port": 9090},
@@ -436,12 +457,27 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "enabled": True,
                 "webhook_url": "${ALERT_WEBHOOK:-}",
                 "rules": [
-                    {"name": "high_error_rate", "expr": "rate(errors[5m]) > 0.1", "severity": "critical"},
-                    {"name": "low_token_pool", "expr": "healthy_tokens < 3", "severity": "warning"},
-                    {"name": "high_latency", "expr": "p99_latency > 30", "severity": "warning"}
-                ]
+                    {
+                        "name": "high_error_rate",
+                        "expr": "rate(errors[5m]) > 0.1",
+                        "severity": "critical",
+                    },
+                    {
+                        "name": "low_token_pool",
+                        "expr": "healthy_tokens < 3",
+                        "severity": "warning",
+                    },
+                    {
+                        "name": "high_latency",
+                        "expr": "p99_latency > 30",
+                        "severity": "warning",
+                    },
+                ],
             },
-            "tracing": {"enabled": True, "jaeger_endpoint": "${JAEGER_ENDPOINT:-http://localhost:14268/api/traces}"}
+            "tracing": {
+                "enabled": True,
+                "jaeger_endpoint": "${JAEGER_ENDPOINT:-http://localhost:14268/api/traces}",
+            },
         },
         "providers": [
             {
@@ -456,7 +492,7 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "auth": {
                     "type": "bearer",
                     "header_name": "Authorization",
-                    "prefix": "Bearer "
+                    "prefix": "Bearer ",
                 },
                 "rate_limit": {"rpm": 3000, "tpm": 1000000, "dynamic": True},
                 "retry": {"max_attempts": 3, "retry_on": [429, 500, 502, 503, 504]},
@@ -466,21 +502,81 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                     "rotate_user_agent": True,
                     "header_randomization": True,
                     "tls_fingerprint": "chrome_120",
-                    "http2_prior_knowledge": True
+                    "http2_prior_knowledge": True,
                 },
-                "health_check": {"enabled": True, "interval": 30, "endpoint": "/v1/models"},
+                "health_check": {
+                    "enabled": True,
+                    "interval": 30,
+                    "endpoint": "/v1/models",
+                },
                 "model_discovery": True,
                 "discovery_interval": 3600,
                 "timeout": 120,
                 "max_concurrent": 50,
                 "models": [
-                    {"id": "gpt-4o", "provider_model": "gpt-4o", "aliases": ["gpt-4o-latest"], "max_tokens": 16384, "context_window": 128000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 5.0, "output": 15.0}, "priority": 10, "tags": ["flagship", "vision"]},
-                    {"id": "gpt-4o-mini", "provider_model": "gpt-4o-mini", "max_tokens": 16384, "context_window": 128000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 0.15, "output": 0.6}, "priority": 20, "tags": ["cheap", "vision"]},
-                    {"id": "gpt-4-turbo", "provider_model": "gpt-4-turbo-preview", "aliases": ["gpt-4-turbo"], "max_tokens": 4096, "context_window": 128000, "supports_streaming": True, "pricing": {"input": 10.0, "output": 30.0}, "priority": 30},
-                    {"id": "gpt-3.5-turbo", "provider_model": "gpt-3.5-turbo", "max_tokens": 4096, "context_window": 16384, "supports_streaming": True, "pricing": {"input": 0.5, "output": 1.5}, "priority": 50},
-                    {"id": "o1-preview", "provider_model": "o1-preview", "max_tokens": 32768, "context_window": 128000, "supports_streaming": False, "pricing": {"input": 15.0, "output": 60.0}, "priority": 5, "tags": ["reasoning"]},
-                    {"id": "o1-mini", "provider_model": "o1-mini", "max_tokens": 65536, "context_window": 128000, "supports_streaming": False, "pricing": {"input": 3.0, "output": 12.0}, "priority": 15, "tags": ["reasoning", "cheap"]}
-                ]
+                    {
+                        "id": "gpt-4o",
+                        "provider_model": "gpt-4o",
+                        "aliases": ["gpt-4o-latest"],
+                        "max_tokens": 16384,
+                        "context_window": 128000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 5.0, "output": 15.0},
+                        "priority": 10,
+                        "tags": ["flagship", "vision"],
+                    },
+                    {
+                        "id": "gpt-4o-mini",
+                        "provider_model": "gpt-4o-mini",
+                        "max_tokens": 16384,
+                        "context_window": 128000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 0.15, "output": 0.6},
+                        "priority": 20,
+                        "tags": ["cheap", "vision"],
+                    },
+                    {
+                        "id": "gpt-4-turbo",
+                        "provider_model": "gpt-4-turbo-preview",
+                        "aliases": ["gpt-4-turbo"],
+                        "max_tokens": 4096,
+                        "context_window": 128000,
+                        "supports_streaming": True,
+                        "pricing": {"input": 10.0, "output": 30.0},
+                        "priority": 30,
+                    },
+                    {
+                        "id": "gpt-3.5-turbo",
+                        "provider_model": "gpt-3.5-turbo",
+                        "max_tokens": 4096,
+                        "context_window": 16384,
+                        "supports_streaming": True,
+                        "pricing": {"input": 0.5, "output": 1.5},
+                        "priority": 50,
+                    },
+                    {
+                        "id": "o1-preview",
+                        "provider_model": "o1-preview",
+                        "max_tokens": 32768,
+                        "context_window": 128000,
+                        "supports_streaming": False,
+                        "pricing": {"input": 15.0, "output": 60.0},
+                        "priority": 5,
+                        "tags": ["reasoning"],
+                    },
+                    {
+                        "id": "o1-mini",
+                        "provider_model": "o1-mini",
+                        "max_tokens": 65536,
+                        "context_window": 128000,
+                        "supports_streaming": False,
+                        "pricing": {"input": 3.0, "output": 12.0},
+                        "priority": 15,
+                        "tags": ["reasoning", "cheap"],
+                    },
+                ],
             },
             {
                 "name": "anthropic",
@@ -492,13 +588,47 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "tags": ["official", "premium"],
                 "auth": {"type": "api_key", "header_name": "x-api-key", "prefix": ""},
                 "rate_limit": {"rpm": 1000, "tpm": 500000, "dynamic": True},
-                "health_check": {"enabled": True, "interval": 30, "endpoint": "/v1/models"},
+                "health_check": {
+                    "enabled": True,
+                    "interval": 30,
+                    "endpoint": "/v1/models",
+                },
                 "model_discovery": True,
                 "models": [
-                    {"id": "claude-3-5-sonnet", "provider_model": "claude-3-5-sonnet-20241022", "max_tokens": 8192, "context_window": 200000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 3.0, "output": 15.0}, "priority": 10, "tags": ["flagship", "vision"]},
-                    {"id": "claude-3-5-haiku", "provider_model": "claude-3-5-haiku-20241022", "max_tokens": 8192, "context_window": 200000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 0.8, "output": 4.0}, "priority": 20, "tags": ["cheap", "vision", "fast"]},
-                    {"id": "claude-3-opus", "provider_model": "claude-3-opus-20240229", "max_tokens": 4096, "context_window": 200000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 15.0, "output": 75.0}, "priority": 5, "tags": ["flagship", "vision"]}
-                ]
+                    {
+                        "id": "claude-3-5-sonnet",
+                        "provider_model": "claude-3-5-sonnet-20241022",
+                        "max_tokens": 8192,
+                        "context_window": 200000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 3.0, "output": 15.0},
+                        "priority": 10,
+                        "tags": ["flagship", "vision"],
+                    },
+                    {
+                        "id": "claude-3-5-haiku",
+                        "provider_model": "claude-3-5-haiku-20241022",
+                        "max_tokens": 8192,
+                        "context_window": 200000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 0.8, "output": 4.0},
+                        "priority": 20,
+                        "tags": ["cheap", "vision", "fast"],
+                    },
+                    {
+                        "id": "claude-3-opus",
+                        "provider_model": "claude-3-opus-20240229",
+                        "max_tokens": 4096,
+                        "context_window": 200000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 15.0, "output": 75.0},
+                        "priority": 5,
+                        "tags": ["flagship", "vision"],
+                    },
+                ],
             },
             {
                 "name": "google",
@@ -510,12 +640,44 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "tags": ["official"],
                 "auth": {"type": "query_param", "query_param": "key"},
                 "rate_limit": {"rpm": 1500, "tpm": 1000000},
-                "health_check": {"enabled": True, "interval": 60, "endpoint": "/v1/models"},
+                "health_check": {
+                    "enabled": True,
+                    "interval": 60,
+                    "endpoint": "/v1/models",
+                },
                 "models": [
-                    {"id": "gemini-1.5-pro", "provider_model": "gemini-1.5-pro", "max_tokens": 8192, "context_window": 2000000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 3.5, "output": 10.5}, "priority": 10, "tags": ["flagship", "vision", "long-context"]},
-                    {"id": "gemini-1.5-flash", "provider_model": "gemini-1.5-flash", "max_tokens": 8192, "context_window": 1000000, "supports_streaming": True, "supports_vision": True, "pricing": {"input": 0.075, "output": 0.3}, "priority": 20, "tags": ["cheap", "vision", "fast"]},
-                    {"id": "gemini-1.0-pro", "provider_model": "gemini-1.0-pro", "max_tokens": 2048, "context_window": 32768, "supports_streaming": True, "pricing": {"input": 0.5, "output": 1.5}, "priority": 40}
-                ]
+                    {
+                        "id": "gemini-1.5-pro",
+                        "provider_model": "gemini-1.5-pro",
+                        "max_tokens": 8192,
+                        "context_window": 2000000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 3.5, "output": 10.5},
+                        "priority": 10,
+                        "tags": ["flagship", "vision", "long-context"],
+                    },
+                    {
+                        "id": "gemini-1.5-flash",
+                        "provider_model": "gemini-1.5-flash",
+                        "max_tokens": 8192,
+                        "context_window": 1000000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "pricing": {"input": 0.075, "output": 0.3},
+                        "priority": 20,
+                        "tags": ["cheap", "vision", "fast"],
+                    },
+                    {
+                        "id": "gemini-1.0-pro",
+                        "provider_model": "gemini-1.0-pro",
+                        "max_tokens": 2048,
+                        "context_window": 32768,
+                        "supports_streaming": True,
+                        "pricing": {"input": 0.5, "output": 1.5},
+                        "priority": 40,
+                    },
+                ],
             },
             {
                 "name": "azure",
@@ -529,13 +691,35 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "rate_limit": {"rpm": 2000, "tpm": 800000},
                 "custom_endpoints": {
                     "chat": "/openai/deployments/{model}/chat/completions?api-version=2024-02-15-preview",
-                    "models": "/openai/deployments?api-version=2024-02-15-preview"
+                    "models": "/openai/deployments?api-version=2024-02-15-preview",
                 },
                 "models": [
-                    {"id": "gpt-4o", "provider_model": "gpt-4o", "max_tokens": 16384, "context_window": 128000, "supports_streaming": True, "supports_vision": True, "priority": 10},
-                    {"id": "gpt-4", "provider_model": "gpt-4", "max_tokens": 8192, "context_window": 128000, "supports_streaming": True, "priority": 20},
-                    {"id": "gpt-35-turbo", "provider_model": "gpt-35-turbo", "max_tokens": 4096, "context_window": 16384, "supports_streaming": True, "priority": 40}
-                ]
+                    {
+                        "id": "gpt-4o",
+                        "provider_model": "gpt-4o",
+                        "max_tokens": 16384,
+                        "context_window": 128000,
+                        "supports_streaming": True,
+                        "supports_vision": True,
+                        "priority": 10,
+                    },
+                    {
+                        "id": "gpt-4",
+                        "provider_model": "gpt-4",
+                        "max_tokens": 8192,
+                        "context_window": 128000,
+                        "supports_streaming": True,
+                        "priority": 20,
+                    },
+                    {
+                        "id": "gpt-35-turbo",
+                        "provider_model": "gpt-35-turbo",
+                        "max_tokens": 4096,
+                        "context_window": 16384,
+                        "supports_streaming": True,
+                        "priority": 40,
+                    },
+                ],
             },
             {
                 "name": "custom",
@@ -547,15 +731,19 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "tags": ["local", "ollama", "vllm", "tgi"],
                 "auth": {"type": "none"},
                 "rate_limit": {"rpm": 10000, "tpm": 5000000},
-                "health_check": {"enabled": True, "interval": 15, "endpoint": "/api/tags"},
+                "health_check": {
+                    "enabled": True,
+                    "interval": 15,
+                    "endpoint": "/api/tags",
+                },
                 "model_discovery": True,
                 "discovery_interval": 60,
                 "custom_endpoints": {
                     "chat": "/v1/chat/completions",
-                    "models": "/v1/models"
+                    "models": "/v1/models",
                 },
-                "models": []
-            }
+                "models": [],
+            },
         ],
         "token_factories": {
             "openai": {
@@ -567,13 +755,13 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "generation": {
                     "method": "api_key_rotation",
                     "account_credentials": "${OPENAI_ACCOUNT_CREDS:-}",
-                    "max_keys_per_account": 5
+                    "max_keys_per_account": 5,
                 },
                 "validation": {"test_model": "gpt-3.5-turbo", "test_prompt": "ping"},
                 "auto_refresh": True,
                 "refresh_interval": 1800,
                 "min_pool_size": 10,
-                "max_pool_size": 100
+                "max_pool_size": 100,
             },
             "anthropic": {
                 "enabled": True,
@@ -585,7 +773,7 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "auto_refresh": True,
                 "refresh_interval": 1800,
                 "min_pool_size": 5,
-                "max_pool_size": 50
+                "max_pool_size": 50,
             },
             "google": {
                 "enabled": True,
@@ -597,7 +785,7 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "auto_refresh": True,
                 "refresh_interval": 1800,
                 "min_pool_size": 5,
-                "max_pool_size": 50
+                "max_pool_size": 50,
             },
             "scraped": {
                 "enabled": False,
@@ -605,17 +793,25 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "sources": ["scraped"],
                 "scraping": {
                     "targets": [
-                        {"url": "https://platform.openai.com/api-keys", "selectors": {"token": "[data-testid='api-key']"}, "login_flow": "manual"},
-                        {"url": "https://console.anthropic.com/settings/keys", "selectors": {"token": ".api-key-value"}, "login_flow": "manual"}
+                        {
+                            "url": "https://platform.openai.com/api-keys",
+                            "selectors": {"token": "[data-testid='api-key']"},
+                            "login_flow": "manual",
+                        },
+                        {
+                            "url": "https://console.anthropic.com/settings/keys",
+                            "selectors": {"token": ".api-key-value"},
+                            "login_flow": "manual",
+                        },
                     ],
                     "headless": True,
                     "browser": "chromium",
-                    "interval": 3600
+                    "interval": 3600,
                 },
                 "validation": {"test_prompt": "ping"},
                 "min_pool_size": 3,
-                "max_pool_size": 20
-            }
+                "max_pool_size": 20,
+            },
         },
         "auto_registration": {
             "openai": {
@@ -629,7 +825,7 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                 "browser_config": {
                     "headless": True,
                     "proxy": "${REG_PROXY:-}",
-                    "block_resources": ["image", "font", "media", "stylesheet"]
+                    "block_resources": ["image", "font", "media", "stylesheet"],
                 },
                 "registration_config": {
                     "register_url": "https://platform.openai.com/signup",
@@ -639,29 +835,33 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                     "submit_selector": "button[type='submit']",
                     "captcha_selectors": {
                         "recaptcha": ".g-recaptcha",
-                        "hcaptcha": ".h-captcha"
+                        "hcaptcha": ".h-captcha",
                     },
                     "verification_selectors": {
                         "email_code": "input[name='code']",
-                        "phone_code": "input[name='phone_code']"
+                        "phone_code": "input[name='phone_code']",
                     },
                     "token_extractors": [
                         {"type": "cookie", "name": "__Secure-session"},
                         {"type": "local_storage", "key": "accessToken"},
-                        {"type": "regex", "pattern": "sk-[a-zA-Z0-9]{48}", "source": "response"}
-                    ]
+                        {
+                            "type": "regex",
+                            "pattern": "sk-[a-zA-Z0-9]{48}",
+                            "source": "response",
+                        },
+                    ],
                 },
                 "profile_generator": {
                     "locale": "en_US",
                     "name_format": "first_last",
-                    "password_length": 16
+                    "password_length": 16,
                 },
                 "min_pool_size": 5,
                 "max_pool_size": 20,
                 "replenish_interval": 300,
                 "max_concurrent_registrations": 2,
                 "retry_attempts": 3,
-                "account_lifetime": 86400
+                "account_lifetime": 86400,
             },
             "anthropic": {
                 "enabled": False,
@@ -678,19 +878,23 @@ def _legacy_create_example_config(path: Union[str, Path] = "config.yaml"):
                     "submit_selector": "button[type='submit']",
                     "token_extractors": [
                         {"type": "cookie", "name": "session"},
-                        {"type": "local_storage", "key": "apiKey"}
-                    ]
+                        {"type": "local_storage", "key": "apiKey"},
+                    ],
                 },
                 "min_pool_size": 3,
-                "max_pool_size": 15
-            }
-        }
+                "max_pool_size": 15,
+            },
+        },
     }
 
-    Path(path).write_text(yaml.dump(config, sort_keys=False, allow_unicode=True, width=200), encoding="utf-8")
+    Path(path).write_text(
+        yaml.dump(config, sort_keys=False, allow_unicode=True, width=200),
+        encoding="utf-8",
+    )
     print(f"Created comprehensive config at {path}")
 
 
 if __name__ == "__main__":
     import sys
+
     create_example_config(sys.argv[1] if len(sys.argv) > 1 else "config.yaml")

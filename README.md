@@ -13,10 +13,15 @@ YAML-driven multi-provider API gateway with token pooling, failover, health chec
 - Memory, atomic JSON, and Redis storage
 - Import of operator-provided credentials from `STATIC`, `ENV`, and `FILE` sources
 - FastAPI gateway with separate client and admin keys
-- OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions`
-- SSE streaming responses
+- Operator-issued public API keys stored as SHA-256 hashes only
+- Per-key RPM, RPD, and lifetime token limits
+- Public key issue, list, and revoke admin endpoints
+- Client usage reporting after normal and streaming completions
+- OpenAI-compatible `GET /v1/models` with pricing, limits, capabilities, and metadata
+- OpenAI-compatible `POST /v1/chat/completions` and SSE streaming responses
+- Docker/Compose production stack with Redis and Caddy automatic TLS
 - CLI commands for configuration generation, validation, and startup
-- Tests for configuration, storage, failover, source loading, and authorization
+- Tests for configuration, storage, failover, source loading, authorization, and public API behavior
 
 Automatic account creation, disposable-mail registration, CAPTCHA solving, and third-party account farming are not part of this implementation. The gateway operates on credentials explicitly imported by the operator.
 
@@ -34,7 +39,8 @@ token_abuse_engine/
   pool.py
   storage.py
   token_sources.py
-  tests/
+  public_api.py
+tests/
 config.yaml
 requirements.txt
 pyproject.toml
@@ -127,6 +133,54 @@ curl.exe -N http://127.0.0.1:8080/v1/chat/completions `
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}],"stream":true}'
 ```
 
+## Public Client API Keys
+
+Public keys are issued by an operator and stored only as SHA-256 hashes. The raw key is returned exactly once by `POST /admin/api-keys`; list responses never include the hash or secret.
+
+Issue a key:
+
+```powershell README.md
+$body = @{
+  name = 'customer-a'
+  rpm_limit = 60
+  rpd_limit = 10000
+  token_limit = 1000000
+  ttl_days = 30
+  metadata = @{ plan = 'standard' }
+} | ConvertTo-Json -Depth 4
+Invoke-RestMethod -Method Post `
+  -Uri 'http://127.0.0.1:8080/admin/api-keys' `
+  -Headers @{ Authorization = 'Bearer replace-with-admin-key' } `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+List keys without secrets:
+
+```powershell README.md
+Invoke-RestMethod `
+  -Uri 'http://127.0.0.1:8080/admin/api-keys' `
+  -Headers @{ Authorization = 'Bearer replace-with-admin-key' }
+```
+
+Revoke a key:
+
+```powershell README.md
+Invoke-WebRequest -Method Delete `
+  -Uri 'http://127.0.0.1:8080/admin/api-keys/key_replace-me' `
+  -Headers @{ Authorization = 'Bearer replace-with-admin-key' }
+```
+
+Read current counters and limits:
+
+```powershell README.md
+Invoke-RestMethod `
+  -Uri 'http://127.0.0.1:8080/v1/usage' `
+  -Headers @{ Authorization = 'Bearer replace-with-issued-client-key' }
+```
+
+A limit of `0` means unlimited. Requests exceeding RPM/RPD return `429` with `Retry-After`. Token usage is recorded after successful normal and streaming completions when the upstream response includes usage metadata.
+
 ## Model Discovery
 
 Configured models are always available immediately. When a provider has `model_discovery: true` and at least one available credential, the gateway refreshes its catalog in the background according to `discovery_interval`.
@@ -141,14 +195,62 @@ Invoke-RestMethod -Method Post `
 
 Omit `provider` to refresh every enabled provider. Newly discovered model IDs are merged by `provider_model`, so repeated refreshes do not duplicate catalog entries.
 
+## Production Deployment
+
+The production stack runs the gateway as a non-root container, Redis with AOF persistence, and Caddy as the TLS reverse proxy. Caddy requires inbound TCP ports 80/443 and UDP 443 open, plus a DNS `A`/`AAAA` record for `PUBLIC_DOMAIN` pointing to the host.
+
+Create a local `.env` file (it is gitignored) with at least:
+
+```dotenv .env
+PUBLIC_DOMAIN=api.example.com
+PUBLIC_ORIGIN=https://api.example.com
+GATEWAY_API_KEY=generated-random-client-bootstrap-key
+ADMIN_API_KEY=generated-random-admin-key
+OPENAI_TOKEN_PRIMARY=authorized-upstream-credential
+ANTHROPIC_TOKEN_PRIMARY=authorized-upstream-credential
+GOOGLE_TOKEN_PRIMARY=authorized-upstream-credential
+SUPPORT_URL=https://example.com/support
+TERMS_URL=https://example.com/terms
+PRIVACY_URL=https://example.com/privacy
+```
+
+Generate management secrets with:
+
+```powershell README.md
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Validate and start:
+
+```powershell README.md
+python -m token_abuse_engine.main validate config.production.yaml
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+```
+
+Caddy obtains and renews TLS certificates automatically. The gateway itself listens only on the internal Compose network and is exposed through Caddy. Redis is also internal-only and uses the `redis-data` volume.
+
+Required external resources before accepting public traffic:
+
+- a reachable production host or managed container platform;
+- DNS plus TCP 80/443 and UDP 443 ingress/egress;
+- Redis (the bundled service or managed Redis);
+- authorized OpenAI, Anthropic, and/or Google upstream credentials;
+- final billing policy, support, terms, and privacy URLs.
+
 ## Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Public provider and pool status |
 | `GET` | `/metrics` | Public JSON metrics |
-| `GET` | `/v1/models` | Configured model catalog |
+| `GET` | `/v1/models` | Model catalog with pricing, limits, capabilities, and metadata |
+| `GET` | `/v1/usage` | Current authenticated client key usage and quotas |
 | `POST` | `/v1/chat/completions` | Completion or SSE stream |
+| `POST` | `/admin/api-keys` | Issue a public client key (raw key returned once) |
+| `GET` | `/admin/api-keys` | List public key metadata without secrets/hashes |
+| `DELETE` | `/admin/api-keys/{id}` | Revoke a public client key |
 | `POST` | `/admin/models/discover` | Refresh provider model catalogs |
 | `POST` | `/admin/tokens` | Import an authorized token |
 | `DELETE` | `/admin/tokens/{provider}/{fingerprint}` | Remove a token |
@@ -157,5 +259,5 @@ Omit `provider` to refresh every enabled provider. Newly discovered model IDs ar
 
 ```powershell README.md
 python -m compileall -q token_abuse_engine
-python -m pytest -q token_abuse_engine\tests
+python -m pytest -q
 ```

@@ -91,8 +91,12 @@ def command_validate(args: argparse.Namespace) -> int:
             "port": config.gateway.bind_port,
             "workers": config.gateway.workers,
         },
-        "api_keys_configured": bool(config.gateway.api_keys),
-        "admin_keys_configured": bool(config.gateway.admin_keys),
+        "api_keys_configured": any(
+            key.strip() for key in config.gateway.api_keys
+        ),
+        "admin_keys_configured": any(
+            key.strip() for key in config.gateway.admin_keys
+        ),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

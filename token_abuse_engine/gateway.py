@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
+import logging
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -18,8 +22,116 @@ from .adapters import AdapterFactory, ProviderError
 from .config import EngineConfig
 from .models import Token, TokenOrigin, TokenStatus
 from .pool import NoHealthyTokenError, TokenPool, create_selection_strategy
+from .public_api import (
+    ApiKeyRecord,
+    PublicApiError,
+    PublicApiKeyManager,
+)
 from .storage import TokenStore, create_token_store
 from .token_sources import TokenSourceLoader
+
+logger = logging.getLogger(__name__)
+
+
+def _update_stream_usage(state: dict[str, int], value: Any) -> None:
+    """Merge cumulative usage from provider-compatible JSON payloads."""
+    if isinstance(value, list):
+        for item in value:
+            _update_stream_usage(state, item)
+        return
+    if not isinstance(value, Mapping):
+        return
+
+    for nested_key in ("usage", "usageMetadata", "message"):
+        nested = value.get(nested_key)
+        if isinstance(nested, (Mapping, list)):
+            _update_stream_usage(state, nested)
+
+    usage = value.get("usage")
+    if not isinstance(usage, Mapping):
+        usage = value.get("usageMetadata")
+    if not isinstance(usage, Mapping):
+        return
+
+    prompt = usage.get(
+        "prompt_tokens",
+        usage.get("input_tokens", usage.get("promptTokenCount", 0)),
+    )
+    completion = usage.get(
+        "completion_tokens",
+        usage.get("output_tokens", usage.get("candidatesTokenCount", 0)),
+    )
+    total = usage.get("total_tokens", usage.get("totalTokenCount", 0))
+    for key, raw_value in (
+        ("prompt", prompt),
+        ("completion", completion),
+        ("total", total),
+    ):
+        try:
+            state[key] = max(state[key], int(raw_value or 0))
+        except (TypeError, ValueError):
+            continue
+
+
+def _update_stream_usage_line(state: dict[str, int], line: str) -> None:
+    raw = line.strip()
+    if raw.startswith("data:"):
+        raw = raw[5:].strip()
+    if not raw or raw == "[DONE]":
+        return
+    try:
+        _update_stream_usage(state, json.loads(raw))
+    except (json.JSONDecodeError, TypeError):
+        return
+
+
+def _completion_usage_tokens(result: Mapping[str, Any]) -> int:
+    usage = result.get("usage")
+    if not isinstance(usage, Mapping):
+        return 0
+    try:
+        return int(
+            usage.get("total_tokens")
+            or (
+                int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                + int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+            )
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _key_matches(key: str, candidates: list[str]) -> bool:
+    if not key:
+        return False
+    return any(
+        bool(candidate) and hmac.compare_digest(key, candidate)
+        for candidate in candidates
+    )
+
+
+def _public_api_error_response(exc: PublicApiError) -> JSONResponse:
+    headers = None
+    retry_after = getattr(exc, "retry_after", None)
+    if retry_after is not None:
+        headers = {"Retry-After": str(retry_after)}
+    lowered = str(exc).lower()
+    if exc.status_code == 429:
+        error_type = "quota_exceeded"
+    elif "revoked" in lowered or "expired" in lowered:
+        error_type = "revoked_api_key"
+    else:
+        error_type = "invalid_api_key"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": error_type,
+            }
+        },
+        headers=headers,
+    )
 
 
 class ChatRequest(BaseModel):
@@ -36,6 +148,15 @@ class ChatRequest(BaseModel):
     provider: str | None = None
 
 
+class IssueApiKeyRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    rpm_limit: int | None = Field(default=None, ge=0)
+    rpd_limit: int | None = Field(default=None, ge=0)
+    token_limit: int | None = Field(default=None, ge=0)
+    ttl_days: int | None = Field(default=None, ge=0, le=3650)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AddTokenRequest(BaseModel):
     provider: str
     value: str = Field(min_length=1)
@@ -47,6 +168,7 @@ class GatewayEngine:
     def __init__(self, config: EngineConfig) -> None:
         self.config = config
         self.store: TokenStore = create_token_store(config.storage)
+        self.public_keys = PublicApiKeyManager(config.gateway.public_api)
         self.token_source_loader = TokenSourceLoader()
         self.pools: dict[str, TokenPool] = {}
         self._health_tasks: list[asyncio.Task[None]] = []
@@ -75,6 +197,15 @@ class GatewayEngine:
                     await pool.add_token(token)
             self.pools[provider.name] = pool
 
+        if self.config.gateway.public_api.enabled:
+            for raw_key in self.config.gateway.api_keys:
+                if raw_key.strip():
+                    await self.public_keys.register_existing(
+                        raw_key,
+                        rpm_limit=self.config.gateway.rate_limit.rpm,
+                        rpd_limit=self.config.gateway.rate_limit.rpd,
+                    )
+
         for pool in self.pools.values():
             if pool.config.health_check.enabled:
                 interval = max(5, pool.config.health_check.interval)
@@ -85,9 +216,7 @@ class GatewayEngine:
                     )
                 )
             if pool.config.model_discovery:
-                discovery_interval = max(
-                    60, pool.config.discovery_interval
-                )
+                discovery_interval = max(60, pool.config.discovery_interval)
                 self._discovery_tasks.append(
                     asyncio.create_task(
                         self._discovery_loop(pool, discovery_interval),
@@ -105,7 +234,11 @@ class GatewayEngine:
             *(pool.close() for pool in self.pools.values()),
             return_exceptions=True,
         )
-        await self.store.close()
+        await asyncio.gather(
+            self.store.close(),
+            self.public_keys.close(),
+            return_exceptions=True,
+        )
 
     async def health(self) -> dict[str, Any]:
         providers: dict[str, Any] = {}
@@ -159,9 +292,7 @@ class GatewayEngine:
             raise HTTPException(503, "No providers are enabled")
 
         fallback_model = (
-            self.config.fallback_models[0]
-            if self.config.fallback_models
-            else ""
+            self.config.fallback_models[0] if self.config.fallback_models else ""
         )
         if fallback_model and fallback_model in aliases:
             return self.pools[aliases[fallback_model]]
@@ -193,14 +324,8 @@ class GatewayEngine:
         if not await pool.delete_token(fingerprint):
             raise HTTPException(404, "Token not found")
 
-    async def discover_models(
-        self, provider_name: str | None = None
-    ) -> dict[str, Any]:
-        names = (
-            [provider_name]
-            if provider_name
-            else list(self.pools)
-        )
+    async def discover_models(self, provider_name: str | None = None) -> dict[str, Any]:
+        names = [provider_name] if provider_name else list(self.pools)
         added: dict[str, int] = {}
         errors: dict[str, str] = {}
         for name in names:
@@ -217,10 +342,7 @@ class GatewayEngine:
     async def _discover_pool(self, pool: TokenPool) -> int:
         token = pool.select()
         discovered = await pool.adapter.discover_models(token)
-        known = {
-            model.provider_model
-            for model in pool.config.models
-        }
+        known = {model.provider_model for model in pool.config.models}
         added = 0
         for model in discovered:
             if model.provider_model in known:
@@ -230,9 +352,7 @@ class GatewayEngine:
             added += 1
         return added
 
-    async def _discovery_loop(
-        self, pool: TokenPool, interval: int
-    ) -> None:
+    async def _discovery_loop(self, pool: TokenPool, interval: int) -> None:
         while True:
             try:
                 await self._discover_pool(pool)
@@ -291,18 +411,37 @@ def create_app(config: EngineConfig) -> FastAPI:
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
-        if request.url.path in public_paths:
+        if request.method == "OPTIONS" or request.url.path in public_paths:
             return await call_next(request)
 
         authorization = request.headers.get("Authorization", "")
         key = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
-        valid_keys = set(config.gateway.api_keys) | set(config.gateway.admin_keys)
-        if valid_keys and key not in valid_keys:
+        request.state.api_key = key
+        request.state.is_admin = False
+        request.state.api_key_record = None
+
+        if config.gateway.admin_keys and _key_matches(key, config.gateway.admin_keys):
+            request.state.is_admin = True
+            return await call_next(request)
+
+        if config.gateway.public_api.enabled:
+            try:
+                record = await engine.public_keys.authenticate(key)
+            except PublicApiError as exc:
+                return _public_api_error_response(exc)
+            request.state.api_key_record = record
+            return await call_next(request)
+
+        if config.gateway.api_keys and not _key_matches(key, config.gateway.api_keys):
             return JSONResponse(
                 status_code=401,
-                content={"error": {"message": "Invalid API key"}},
+                content={
+                    "error": {
+                        "message": "Invalid API key",
+                        "type": "invalid_api_key",
+                    }
+                },
             )
-        request.state.api_key = key
         return await call_next(request)
 
     @app.exception_handler(NoHealthyTokenError)
@@ -336,10 +475,26 @@ def create_app(config: EngineConfig) -> FastAPI:
             else None,
         )
 
+    @app.exception_handler(PublicApiError)
+    async def public_api_error_handler(
+        request: Request,
+        exc: PublicApiError,
+    ) -> JSONResponse:
+        return _public_api_error_response(exc)
+
     async def require_admin(request: Request) -> None:
-        key = getattr(request.state, "api_key", "")
-        if not config.gateway.admin_keys or key not in config.gateway.admin_keys:
+        if not getattr(request.state, "is_admin", False):
             raise HTTPException(403, "Admin key required")
+
+    async def require_public_api(request: Request) -> None:
+        if not config.gateway.public_api.enabled:
+            raise HTTPException(404, "Public API is disabled")
+
+    async def require_client_key(request: Request) -> ApiKeyRecord:
+        record = getattr(request.state, "api_key_record", None)
+        if not isinstance(record, ApiKeyRecord):
+            raise HTTPException(403, "Client API key required")
+        return record
 
     @app.get(config.gateway.health_path)
     async def health() -> dict[str, Any]:
@@ -353,12 +508,22 @@ def create_app(config: EngineConfig) -> FastAPI:
     async def list_models() -> dict[str, Any]:
         data: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
+        public_config = config.gateway.public_api
         for provider_name, pool in engine.pools.items():
             for model in pool.config.models:
                 key = (provider_name, model.provider_model)
                 if key in seen or model.deprecated:
                     continue
                 seen.add(key)
+                capabilities = list(model.capabilities)
+                for supported, capability in (
+                    (model.supports_streaming, "streaming"),
+                    (model.supports_functions, "functions"),
+                    (model.supports_vision, "vision"),
+                    (model.supports_audio, "audio"),
+                ):
+                    if supported and capability not in capabilities:
+                        capabilities.append(capability)
                 data.append(
                     {
                         "id": model.id,
@@ -366,9 +531,66 @@ def create_app(config: EngineConfig) -> FastAPI:
                         "created": int(engine._started_at),
                         "owned_by": provider_name,
                         "provider": provider_name,
+                        "pricing": dict(model.pricing),
+                        "limits": {
+                            "max_tokens": model.max_tokens,
+                            "context_window": model.context_window,
+                            "rpm": pool.config.rate_limit.rpm,
+                            "tpm": pool.config.rate_limit.tpm,
+                            "rpd": pool.config.rate_limit.rpd,
+                        },
+                        "metadata": {
+                            "provider_model": model.provider_model,
+                            "aliases": list(model.aliases),
+                            "capabilities": capabilities,
+                            "supports_streaming": model.supports_streaming,
+                            "supports_functions": model.supports_functions,
+                            "supports_vision": model.supports_vision,
+                            "supports_audio": model.supports_audio,
+                            "tags": list(model.tags),
+                            "priority": model.priority,
+                        },
                     }
                 )
-        return {"object": "list", "data": data}
+        return {
+            "object": "list",
+            "data": data,
+            "metadata": {
+                "issuer": public_config.issuer_name,
+                "support_url": public_config.support_url,
+                "terms_url": public_config.terms_url,
+                "privacy_url": public_config.privacy_url,
+            },
+        }
+
+    @app.get("/v1/usage")
+    async def usage(request: Request) -> dict[str, Any]:
+        await require_public_api(request)
+        record = await require_client_key(request)
+        usage_data = await engine.public_keys.usage(record.id)
+        return {
+            "object": "usage",
+            "key_id": record.id,
+            "key": {
+                "name": record.name,
+                "prefix": record.prefix,
+                "status": record.status.value,
+                "created_at": record.created_at,
+                "expires_at": record.expires_at,
+                "metadata": dict(record.metadata),
+            },
+            "usage": usage_data,
+            "limits": {
+                "rpm": record.rpm_limit,
+                "rpd": record.rpd_limit,
+                "tokens_total": record.token_limit,
+            },
+            "remaining_tokens": (
+                max(0, record.token_limit - usage_data["tokens_total"])
+                if record.token_limit > 0
+                else None
+            ),
+        }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(payload: ChatRequest, request: Request):
@@ -379,16 +601,48 @@ def create_app(config: EngineConfig) -> FastAPI:
         )
         body["model"] = payload.model
         engine._requests_total += 1
+        key_record = getattr(request.state, "api_key_record", None)
 
         if payload.stream:
+            stream_options = body.get("stream_options")
+            if not isinstance(stream_options, dict):
+                stream_options = {}
+            stream_options["include_usage"] = True
+            body["stream_options"] = stream_options
+
             async def stream_response():
-                async for line in pool.stream(body):
-                    if line.startswith(("data:", "event:", "id:", "retry:")):
-                        yield line
-                    else:
-                        yield f"data: {line}"
-                    yield "\n\n"
-                yield "data: [DONE]\n\n"
+                usage_state = {"prompt": 0, "completion": 0, "total": 0}
+                done_sent = False
+                try:
+                    async for line in pool.stream(body):
+                        _update_stream_usage_line(usage_state, line)
+                        if line.strip() == "data: [DONE]":
+                            done_sent = True
+                        if line.startswith(("data:", "event:", "id:", "retry:")):
+                            yield line
+                        else:
+                            yield f"data: {line}"
+                        yield "\n\n"
+                    if not done_sent:
+                        yield "data: [DONE]\n\n"
+                except Exception:
+                    engine._requests_failed += 1
+                    raise
+                finally:
+                    tokens = max(
+                        usage_state["total"],
+                        usage_state["prompt"] + usage_state["completion"],
+                    )
+                    if isinstance(key_record, ApiKeyRecord) and tokens > 0:
+                        try:
+                            await engine.public_keys.record_usage(
+                                key_record.id,
+                                tokens,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to record public API streaming usage"
+                            )
 
             return StreamingResponse(
                 stream_response(),
@@ -401,10 +655,52 @@ def create_app(config: EngineConfig) -> FastAPI:
 
         try:
             result, _token = await pool.execute(body)
+            if isinstance(key_record, ApiKeyRecord):
+                await engine.public_keys.record_usage(
+                    key_record.id,
+                    _completion_usage_tokens(result),
+                )
             return result
         except Exception:
             engine._requests_failed += 1
             raise
+
+    @app.post("/admin/api-keys", status_code=201)
+    async def issue_api_key(
+        payload: IssueApiKeyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        await require_admin(request)
+        await require_public_api(request)
+        raw_key, record = await engine.public_keys.issue(
+            payload.name,
+            rpm_limit=payload.rpm_limit,
+            rpd_limit=payload.rpd_limit,
+            token_limit=payload.token_limit,
+            ttl_days=payload.ttl_days,
+            metadata=payload.metadata,
+        )
+        return {"api_key": raw_key, **record.public_dict()}
+
+    @app.get("/admin/api-keys")
+    async def list_api_keys(request: Request) -> dict[str, Any]:
+        await require_admin(request)
+        await require_public_api(request)
+        records = sorted(
+            await engine.public_keys.store.all(),
+            key=lambda item: (item.created_at, item.id),
+        )
+        return {
+            "object": "list",
+            "data": [record.public_dict() for record in records],
+        }
+
+    @app.delete("/admin/api-keys/{key_id}", status_code=204)
+    async def revoke_api_key(key_id: str, request: Request) -> None:
+        await require_admin(request)
+        await require_public_api(request)
+        if not await engine.public_keys.revoke(key_id):
+            raise HTTPException(404, "API key not found")
 
     @app.post("/admin/models/discover")
     async def discover_models_route(
