@@ -1,204 +1,44 @@
 # language: YAML, file: config.yaml
-# *Полная конфигурация шлюза: мультiprovider, сложный роутинг, healthchecks, лимиты*
+# *Полная конфигурация шлюза для автоматического подхвата и публичной выдачи*
 
-# ==============================================================================
-# GLOBAL SETTINGS
-# ==============================================================================
-global:
-  gateway_name: "ai-provider-unified"
-  environment: "${ENV:-production}"
-  log_level: "${LOG_LEVEL:-info}"
-  bind_host: "0.0.0.0"
-  bind_port: 8080
-  admin_port: 8081
-  graceful_shutdown_timeout_seconds: 30
+admin_api_key: "${ADMIN_API_KEY:-admin-super-secret-key}"
+client_api_key: "${CLIENT_API_KEY:-client-bootstrap-key}"
 
-# ==============================================================================
-# AUTHENTICATION & SECRETS
-# ==============================================================================
-auth:
-  admin_api_key: "${ADMIN_API_KEY:-super-secret-admin-key}"
-  # Базовый клиентский ключ (используется только если public_api отключен)
-  default_client_key: "${CLIENT_API_KEY:-default-client-key}"
-
-# ==============================================================================
-# STORAGE & PERSISTENCE
-# ==============================================================================
 storage:
-  type: "${STORAGE_TYPE:-redis}"
-  redis:
-    url: "${REDIS_URL:-redis://localhost:6379/0}"
-    key_prefix: "aiprovider:"
-    connection_pool_size: 20
+  type: file
   file:
-    path: "./data/state.json"
-    sync_interval_seconds: 5
+    path: ./data/state.json
 
-# ==============================================================================
-# PROVIDERS & MODEL ALIASES
-# ==============================================================================
-providers:
-  openai:
-    enabled: true
-    base_url: "https://api.openai.com/v1"
-    timeout_seconds: 60
-    max_retries: 3
-    retry_backoff_factor: 1.5
-    stream_timeout_seconds: 120
-    
-  anthropic:
-    enabled: true
-    base_url: "https://api.anthropic.com/v1"
-    timeout_seconds: 90
-    max_retries: 2
-    anthropic_version: "2023-06-01"
-
-  google:
-    enabled: true
-    base_url: "https://generativelanguage.googleapis.com/v1beta"
-    timeout_seconds: 60
-    max_retries: 2
-
-  azure_openai:
-    enabled: false # Включить при наличии Azure deployments
-    base_url: "${AZURE_OPENAI_ENDPOINT}"
-    api_version: "2024-02-15-preview"
-    timeout_seconds: 60
-
-# Маппинг псевдонимов моделей на реальные провайдеры
-model_aliases:
-  "gpt-4o": "openai/gpt-4o"
-  "gpt-4o-mini": "openai/gpt-4o-mini"
-  "claude-3-5-sonnet": "anthropic/claude-3-5-sonnet-20241022"
-  "claude-3-opus": "anthropic/claude-3-opus-20240229"
-  "gemini-1.5-pro": "google/gemini-1.5-pro-latest"
-  "smart-model": "openai/gpt-4o"
-  "fast-model": "openai/gpt-4o-mini"
-
-# ==============================================================================
-# TOKEN FACTORIES (Источники ключей)
-# ==============================================================================
+# Источники токенов: шлюз читает эти файлы и автоматически добавляет новые строки в пул
 token_factories:
   openai:
     enabled: true
     provider: openai
-    sources: [env, file, redis]
+    sources: [env, file]
     env_prefix: "OPENAI_TOKEN_"
-    file_path: "./data/tokens/openai.txt"
-    poll_interval_seconds: 15
-    auto_validate: true
+    file_path: ./data/incoming/openai.txt
+    poll_interval_seconds: 15 # Опрос файла каждые 15 секунд
 
   anthropic:
     enabled: true
     provider: anthropic
-    sources: [env, file]
-    env_prefix: "ANTHROPIC_TOKEN_"
-    file_path: "./data/tokens/anthropic.txt"
+    sources: [file]
+    file_path: ./data/incoming/anthropic.txt
     poll_interval_seconds: 15
 
-  google:
-    enabled: true
-    provider: google
-    sources: [env, file]
-    env_prefix: "GOOGLE_TOKEN_"
-    file_path: "./data/tokens/google.txt"
-    poll_interval_seconds: 15
-
-# ==============================================================================
-# ROUTING & LOAD BALANCING
-# ==============================================================================
 routing:
-  default_strategy: "latency_aware"
-  strategies:
-    round_robin:
-      enabled: true
-    least_used:
-      enabled: true
-      window_seconds: 300
-    weighted_random:
-      enabled: true
-    latency_aware:
-      enabled: true
-      ema_alpha: 0.3
-      penalty_429: 5.0
-      penalty_5xx: 2.0
-      
-  failover:
-    enabled: true
-    retry_on_429: true
-    retry_on_5xx: true
-    retry_on_401: false # 401 означает мертвый токен, ретрай бесполезен
-    max_failover_attempts: 3
-    cooldown_on_429_seconds: 60
-    cooldown_on_5xx_seconds: 30
+  strategy: latency_aware
+  retry_on_429: true
+  retry_on_5xx: true
+  retry_on_401: false # Мертвый токен, ретрай бесполезен
+  cooldown_seconds: 60
 
-# ==============================================================================
-# RATE LIMITS & QUOTAS (Для публичных ключей)
-# ==============================================================================
-rate_limits:
-  global_rpm: 1000
-  global_rpd: 100000
-  
-  default_client_limits:
-    rpm: 60
-    rpd: 10000
-    max_tokens_per_request: 8192
-    lifetime_token_limit: 0 # 0 = безлимит
-    ttl_days: 30
-    
-  enforcement:
-    block_on_exceed: true
-    return_retry_after: true
-    header_prefix: "X-RateLimit-"
-
-# ==============================================================================
-# HEALTH CHECKS & CIRCUIT BREAKERS
-# ==============================================================================
-health_checks:
-  enabled: true
-  interval_seconds: 60
-  timeout_seconds: 10
-  test_payload:
-    model: "gpt-4o-mini"
-    messages: [{"role": "user", "content": "ping"}]
-    max_tokens: 1
-
-circuit_breakers:
-  enabled: true
-  failure_threshold: 5
-  success_threshold: 2
-  timeout_seconds: 60
-  half_open_max_requests: 3
-
-# ==============================================================================
-# MODEL DISCOVERY
-# ==============================================================================
-model_discovery:
-  enabled: true
-  interval_seconds: 3600
-  providers: [openai, anthropic, google]
-
-# ==============================================================================
-# PUBLIC API & ISSUANCE
-# ==============================================================================
 public_api:
   enabled: true
-  require_https: true
-  allow_self_registration: false # Ключи выдаются только через админский API
-  key_prefix: "sk-live-"
-  hash_algorithm: "sha256"
-
-# ==============================================================================
-# TELEMETRY & LOGGING
-# ==============================================================================
-telemetry:
-  metrics_enabled: true
-  metrics_port: 9090
-  prometheus_path: "/metrics"
-  
-logging:
-  format: "json"
-  include_headers: false
-  mask_api_keys: true
-  log_request_body: false
-  log_response_body: false
+  require_https: false
+  store_type: memory # Или redis, если запущен Redis
+  key_prefix: "sk-live"
+  default_rpm: 60
+  default_rpd: 10000
+  default_token_limit: 0
+  default_ttl_days: 365
