@@ -30,3 +30,7 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local browser tooling and dependencies
+.cache/
+node_modules/

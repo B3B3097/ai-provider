@@ -30,3 +30,5 @@ tokens/*.yml
 *.key
 config.yaml
 config.local.yaml
+.cache
+**/node_modules
