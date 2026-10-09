@@ -250,6 +250,21 @@ Required external resources before accepting public traffic:
 - authorized OpenAI, Anthropic, and/or Google upstream credentials;
 - final billing policy, support, terms, and privacy URLs.
 
+## CI/CD
+
+- `.github/workflows/ci.yml` — на каждый push и PR: compile, ruff, валидация `config.yaml` и `config.production.yaml`, pytest (Python 3.10 и 3.12), проверка Compose и сборка образа.
+- `.github/workflows/cd.yml` — на push в `main`: тесты, сборка образа в GHCR (`ghcr.io/<owner>/<repo>`), затем деплой по SSH.
+
+Деплой включается только если заданы переменная `DEPLOY_HOST` (repo или environment `production`). Настройки:
+
+| Тип | Имя | Назначение |
+|---|---|---|
+| Variable | `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_PATH` | Хост, пользователь и путь к клонированному репозиторию на сервере |
+| Secret | `DEPLOY_SSH_KEY` | Приватный ключ деплоя (только для этого пользователя) |
+| Secret | `DEPLOY_KNOWN_HOSTS` | Строка known_hosts для сервера (проверка host key) |
+
+На сервере рабочий `.env` (см. «Production Deployment») создаётся вручную и остаётся там. Секреты `GATEWAY_API_KEY`, `ADMIN_API_KEY` и upstream-токены в GitHub и в образ не попадают. Клиентские ключи выпускаются вручную через `POST /admin/api-keys` и передаются владельцем по защищённому каналу; в README, описание репозитория и workflow они не публикуются.
+
 ## Endpoints
 
 | Method | Path | Purpose |
