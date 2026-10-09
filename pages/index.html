@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https: http://localhost:8080 http://127.0.0.1:8080; base-uri 'none'; form-action 'none'">
+<title>Gateway · выпуск ключа</title>
+<link rel="stylesheet" href="style.css">
+<main>
+  <p>LLM GATEWAY / ADMIN</p>
+  <h1>Выпуск клиентского ключа</h1>
+  <p>Админ-ключ и пароль не сохраняются. Клиентский ключ скачивается только в зашифрованном виде: AES-256-GCM, PBKDF2-SHA256, 310 000 итераций.</p>
+  <p>Вводите админ-ключ только для доверенного шлюза. Для удалённого шлюза нужен HTTPS и разрешённый CORS origin этой панели.</p>
+  <form id="issue" autocomplete="off">
+    <label>Адрес шлюза<input id="gateway" type="url" required placeholder="http://localhost:8080"></label>
+    <label>Админ-ключ<input id="admin" type="password" required autocomplete="off"></label>
+    <label>Имя клиента<input id="name" required maxlength="120"></label>
+    <label>Пароль шифрования (не менее 12 символов)<input id="password" type="password" required minlength="12" autocomplete="new-password"></label>
+    <label>Повторите пароль<input id="confirm" type="password" required autocomplete="new-password"></label>
+    <button id="submit">Выпустить и зашифровать</button>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <a id="download" hidden download="gateway-key.encrypted.json">Скачать зашифрованный ключ</a>
+  <p>Сохраните файл и пароль отдельно. Без пароля восстановление невозможно. В локальном dev-режиме выпущенные ключи действуют только до перезапуска шлюза.</p>
+</main>
+<script type="module" src="app.mjs"></script>
+</html>

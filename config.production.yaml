@@ -24,6 +24,7 @@ gateway:
   admin_keys:
     - "${ADMIN_API_KEY:-}"
   cors_origins:
+    - "https://b3b3097.github.io"
     - "${PUBLIC_ORIGIN:-https://localhost}"
   rate_limit:
     rpm: 1000

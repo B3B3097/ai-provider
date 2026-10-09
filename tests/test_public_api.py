@@ -387,7 +387,9 @@ def test_production_config_accepts_url_environment(
 
     config = load_config("config.production.yaml")
 
-    assert config.gateway.cors_origins == ["https://api.example.com"]
+    assert config.gateway.cors_origins == [
+        "https://b3b3097.github.io", "https://api.example.com"
+    ]
 
 
 def test_cors_preflight_does_not_require_api_key() -> None:
@@ -403,3 +405,35 @@ def test_cors_preflight_does_not_require_api_key() -> None:
         )
 
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("origin", [
+    "https://b3b3097.github.io", "http://localhost:8081", "http://127.0.0.1:8081"
+])
+def test_admin_panel_dev_config_smoke(monkeypatch, origin) -> None:
+    import secrets
+
+    monkeypatch.setenv("ADMIN_API_KEY", secrets.token_urlsafe(32))
+    monkeypatch.setenv("GATEWAY_API_KEY", secrets.token_urlsafe(32))
+    config = load_config("config.yaml")
+    # No upstream network or persistent state is needed for admin/auth tests.
+    config.providers = []
+    config.storage = StorageConfig(type="memory")
+    with TestClient(create_app(config)) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/models").status_code == 401
+        preflight = client.options("/admin/api-keys", headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        })
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == origin
+        response = client.post("/admin/api-keys", json={"name": "panel-smoke"},
+                               headers=auth(config.gateway.admin_keys[0]))
+        assert response.status_code == 201
+        assert client.get("/v1/models", headers=auth(response.json()["api_key"])).status_code == 200
+        rejected = client.options("/admin/api-keys", headers={
+            "Origin": "https://untrusted.example", "Access-Control-Request-Method": "POST"
+        })
+        assert rejected.status_code == 400
