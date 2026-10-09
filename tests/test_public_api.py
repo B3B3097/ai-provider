@@ -384,6 +384,8 @@ def test_production_config_accepts_url_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PUBLIC_ORIGIN", "https://api.example.com")
+    monkeypatch.setenv("ADMIN_API_KEY", ADMIN_KEY)
+    monkeypatch.setenv("GATEWAY_API_KEY", CONFIGURED_CLIENT_KEY)
 
     config = load_config("config.production.yaml")
 

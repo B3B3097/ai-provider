@@ -376,6 +376,19 @@ def load_config(path: Union[str, Path]) -> EngineConfig:
         **gateway_data,
     )
 
+    # Fail closed before connecting to storage or starting a production server.
+    if data.get("environment", "production") == "production":
+        admin_keys = {key.strip() for key in gateway.admin_keys if key.strip()}
+        client_keys = {key.strip() for key in gateway.api_keys if key.strip()}
+        if not admin_keys:
+            raise ValueError("Production requires gateway.admin_keys from a secret source")
+        if not client_keys and not gateway.public_api.enabled:
+            raise ValueError("Production requires gateway.api_keys when public_api is disabled")
+        if admin_keys & client_keys:
+            raise ValueError("Client and administrator keys must be different")
+        if any("${" in key for key in admin_keys | client_keys):
+            raise ValueError("Unresolved environment variable in gateway keys")
+
     # Parse storage
     storage = StorageConfig(**data.get("storage", {}))
 

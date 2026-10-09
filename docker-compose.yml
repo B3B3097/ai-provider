@@ -16,6 +16,8 @@ services:
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       GOOGLE_BASE_URL: ${GOOGLE_BASE_URL:-https://generativelanguage.googleapis.com}
       CUSTOM_PROVIDER_URL: ${CUSTOM_PROVIDER_URL:-http://custom:8080/v1}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://localhost}
+      ISSUER_NAME: ${ISSUER_NAME:-Unified LLM Gateway}
       SUPPORT_URL: ${SUPPORT_URL:-}
       TERMS_URL: ${TERMS_URL:-}
       PRIVACY_URL: ${PRIVACY_URL:-}
