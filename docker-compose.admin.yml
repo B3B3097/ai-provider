@@ -1,0 +1,24 @@
+# Local development only: issued keys are in memory and lost on restart.
+services:
+  gateway:
+    build: .
+    command: [python, -m, token_abuse_engine.main, serve, /app/config.yaml, --host, 0.0.0.0, --port, '8080']
+    environment:
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Set GATEWAY_API_KEY}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    tmpfs:
+      - /app/data:mode=1777
+    ports:
+      - '127.0.0.1:8080:8080'
+    security_opt:
+      - no-new-privileges:true
+  panel:
+    image: nginx:1.28-alpine
+    ports:
+      - '127.0.0.1:8081:80'
+    volumes:
+      - ./pages:/usr/share/nginx/html:ro
+    security_opt:
+      - no-new-privileges:true

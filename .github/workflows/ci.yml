@@ -42,6 +42,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test panel encryption and issuance flow
+        run: node --test tests/panel.test.mjs
+      - name: Validate admin Compose manifest
+        run: |
+          export ADMIN_API_KEY="$(openssl rand -hex 32)"
+          export GATEWAY_API_KEY="$(openssl rand -hex 32)"
+          docker compose -f docker-compose.admin.yml config --quiet
       - name: Validate production Compose manifest
         run: docker compose config --quiet
       - name: Validate VS Code launch profile
@@ -55,3 +65,34 @@ jobs:
         run: docker compose -f examples/vscode/show-key-usage.yaml config --quiet
       - name: Build image
         run: docker build --tag unified-llm-gateway:ci .
+      - name: Smoke test admin Compose
+        run: |
+          export ADMIN_API_KEY="$(openssl rand -hex 32)"
+          export GATEWAY_API_KEY="$(openssl rand -hex 32)"
+          trap 'docker compose -f docker-compose.admin.yml down --volumes' EXIT
+          docker compose -f docker-compose.admin.yml up -d --build --wait --wait-timeout 120
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/models)" = 401
+          curl --fail --silent http://127.0.0.1:8081/ | grep -q 'crypto\|app.mjs'
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - run: npm ci --prefix tests/browser
+      - name: Install Chromium
+        working-directory: tests/browser
+        run: npx playwright install --with-deps chromium
+      - name: Browser issuance and encrypted download smoke test
+        run: npm --prefix tests/browser test
